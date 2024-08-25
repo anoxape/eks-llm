@@ -1,0 +1,238 @@
+{{- $secrets := readFile "../secrets.yaml" | fromYaml -}}{{/* non-prod */}}
+{{- $terraform_output := readFile "../terraform_output.json" | fromJson -}}
+
+# https://github.com/bjw-s/helm-charts/blob/main/charts/library/common/values.yaml
+
+secrets:
+  huggingface:
+    stringData:
+      HUGGING_FACE_TOKEN: {{ $secrets.huggingface.token }}
+
+serviceAccount:
+  create: true
+
+controllers:
+  triton-server:
+    type: deployment
+    replicas: ~  # controlled by hpa
+
+    pod: &pod
+      securityContext:
+        runAsNonRoot: true
+        runAsGroup: 1000
+        runAsUser: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      tolerations:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+          operator: Exists
+
+    initContainers:
+      # TODO: unhack
+      chown:
+        image:
+          repository: docker.io/alpine
+          tag: 3.20.2
+
+        command:
+          - /bin/sh
+          - -c
+          - >-
+            chown "$uid":"$gid" "$dir"
+
+        env:
+          uid: "1000"
+          gid: "1000"
+          dir: "/home/triton-server/.cache/huggingface"
+
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: false
+          runAsUser: 0
+
+    containers:
+      triton-server:
+        image: &image
+          repository: nvcr.io/nvidia/tritonserver
+          tag: "24.07-vllm-python-py3"
+
+        # TODO: key expiration:
+        # https://github.com/triton-inference-server/core/blob/main/src/filesystem/api.cc#L260
+        # https://github.com/triton-inference-server/core/blob/main/src/filesystem/implementations/s3.h#L273
+        command:
+          - /bin/sh
+          - -c
+          - |-
+            set -e
+            authorization=$(cat $AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE)
+            credentials=$(curl -H "Authorization: $authorization" $AWS_CONTAINER_CREDENTIALS_FULL_URI)
+            export AWS_ACCESS_KEY_ID=$(echo "$credentials" | jq -re '.AccessKeyId')
+            export AWS_SECRET_ACCESS_KEY=$(echo "$credentials" | jq -re '.SecretAccessKey')
+            export AWS_SESSION_TOKEN=$(echo "$credentials" | jq -re '.Token')
+            exec tritonserver \
+            --model-repository "$model_repository" \
+            --disable-auto-complete-config
+
+        workingDir: /home/triton-server
+
+        env:
+          model_repository: "s3://{{ $terraform_output.triton_s3_bucket_id.value }}/model_repository"
+          HF_HOME: /home/triton-server/.cache/huggingface
+
+        envFrom:
+          - secret: huggingface
+
+        securityContext: &containerSecurityContext
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+          readOnlyRootFilesystem: true
+
+        resources:
+          requests:
+            cpu: 3
+            memory: 12Gi
+            ephemeral-storage: 1Gi
+            nvidia.com/gpu: 1
+          limits:
+            cpu: 3
+            memory: 12Gi
+            ephemeral-storage: 1Gi
+            nvidia.com/gpu: 1
+
+        probes:
+          startup: &probes
+            enabled: true
+            custom: true
+            spec: &probes_spec
+              httpGet:
+                path: /v2/health/live
+                port: 8000
+              timeoutSeconds: 1
+              periodSeconds: 5
+              successThreshold: 1
+              failureThreshold: 24  # = 2 minutes
+          liveness:
+            <<: *probes
+            spec:
+              <<: *probes_spec
+              failureThreshold: 6  # = 30 seconds
+          readiness:
+            <<: *probes
+            spec:
+              <<: *probes_spec
+              httpGet:
+                path: /v2/health/ready
+                port: 8000
+              failureThreshold: 6  # = 30 seconds
+
+  prefetch:  # tritonserver container image on each gpu node
+    type: daemonset
+
+    pod: *pod
+
+    containers:
+      prefetch:
+        image: *image
+
+        command:
+          - /bin/sh
+          - -c
+          - >-
+            while true; do sleep 3600; done
+
+        securityContext: *containerSecurityContext
+
+service:
+  triton-server:
+    primary: true
+    controller: triton-server
+    ports:
+      http:
+        primary: true
+        port: 8000
+      grpc:
+        port: 8001
+      metrics:
+        port: 8002
+
+
+serviceMonitor:
+  triton-server:
+    serviceName: triton-server
+    endpoints:
+      - port: metrics
+        interval: 15s
+
+persistence:
+  config:
+    type: emptyDir
+    advancedMounts:
+      triton-server:
+        triton-server:
+          - path: /home/triton-server/.config
+
+  huggingface:
+    type: hostPath  # cache models on host
+    hostPath: /var/cache/huggingface
+    hostPathType: DirectoryOrCreate
+    advancedMounts:
+      triton-server:
+        chown:
+          - path: /home/triton-server/.cache/huggingface
+        triton-server:
+          - path: /home/triton-server/.cache/huggingface
+
+  shm:
+    type: emptyDir
+    medium: Memory
+    advancedMounts:
+      triton-server:
+        triton-server:
+          - path: /dev/shm
+
+  tmp:
+    type: emptyDir
+    advancedMounts:
+      triton-server:
+        triton-server:
+          - path: /tmp
+
+rawResources:
+  hpa:
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    nameOverride: triton-server
+    spec:
+      spec:
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: triton-server
+        minReplicas: 1
+        maxReplicas: 4
+        metrics:
+          - type: Pods
+            pods:
+              metric:
+                name: nv_inference_queue_duration_ms
+              target:
+                type: AverageValue
+                averageValue: 10
+        behavior:
+          scaleDown:
+            stabilizationWindowSeconds: 120  # = 2 minutes
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 10
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5

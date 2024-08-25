@@ -1,0 +1,7 @@
+# https://github.com/NVIDIA/gpu-operator/blob/main/deployments/gpu-operator/values.yaml
+
+driver:
+  enabled: false
+
+toolkit:
+  enabled: false

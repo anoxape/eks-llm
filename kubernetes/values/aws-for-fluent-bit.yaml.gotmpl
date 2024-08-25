@@ -1,0 +1,18 @@
+{{- $terraform_output := readFile "../terraform_output.json" | fromJson -}}
+
+# https://github.com/aws/eks-charts/blob/master/stable/aws-for-fluent-bit/values.yaml
+
+cloudWatchLogs:
+  region: "{{ $terraform_output.region.value }}"
+  logGroupName: "/aws/eks/{{ $terraform_output.eks_cluster_name.value }}/workload"
+  logStreamTemplate: "$kubernetes['namespace_name'].$kubernetes['pod_name'].$kubernetes['container_name']"
+  logRetentionDays: 1  # non-prod
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: "{{ $terraform_output.fluentbit_iam_role_arn.value }}"
+
+tolerations:
+  - key: nvidia.com/gpu
+    effect: NoSchedule
+    operator: Exists

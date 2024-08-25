@@ -1,0 +1,15 @@
+{{- $secrets := readFile "../secrets.yaml" | fromYaml -}}{{/* non-prod */}}
+
+# https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml
+
+alertmanager:
+  enabled: false
+
+grafana:
+  adminPassword: {{ $secrets.grafana.adminPassword }}
+
+prometheus:
+  prometheusSpec:
+    retention: 12h  # non-prod
+    scrapeTimeout: 10s
+    serviceMonitorSelectorNilUsesHelmValues: false

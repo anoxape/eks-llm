@@ -1,0 +1,7 @@
+{
+    "model": "facebook/opt-350m",
+    "gpu_memory_utilization": 0.9,
+    "disable_log_stats": true,
+    "disable_log_requests": true,
+    "enforce_eager": true
+}

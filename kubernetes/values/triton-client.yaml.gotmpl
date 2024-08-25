@@ -1,0 +1,124 @@
+{{- $secrets := readFile "../secrets.yaml" | fromYaml -}}{{/* non-prod */}}
+{{- $terraform_output := readFile "../terraform_output.json" | fromJson -}}
+
+# https://github.com/bjw-s/helm-charts/blob/main/charts/library/common/values.yaml
+
+configMaps:
+  prompts:
+    data:
+      prompts.txt: |
+        {{- readFile "triton-client-prompts.txt" | nindent 8 }}
+
+controllers:
+  triton-client:
+    type: job
+
+    job:
+      backoffLimit: 0
+
+    annotations:
+      helm.sh/hook: post-install,post-upgrade
+
+    initContainers:
+      test:
+        image:
+          repository: python
+          tag: "3.10"
+
+        command:
+          - /bin/sh
+          - -c
+          - >-
+            set -ex
+
+            pip --no-cache-dir install numpy tritonclient[grpc]
+
+            curl -sSL "$client_py" | python -
+            --model "$model"
+            --url "$url"
+            --input-prompts "$input_prompts"
+            --verbose
+
+        workingDir: /workspace
+
+        env:
+          client_py: https://raw.githubusercontent.com/triton-inference-server/vllm_backend/f064eed5af8baeff4d9f7679d8dc64eefe0e0229/samples/client.py
+          model: opt350m
+          url: triton-server.triton-server.svc:8001
+          input_prompts: prompts.txt
+
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+
+        resources:
+          limits:
+            cpu: 1
+            memory: 1Gi
+
+    containers:
+      perf:
+        image:
+          repository: nvcr.io/nvidia/tritonserver
+          tag: "24.07-py3-sdk"
+
+        command:
+          - /bin/sh
+          - -c
+          - >-
+            set -ex
+
+            for concurrency in $concurrency_list; do
+
+            genai-perf
+            --model "$model"
+            --backend vllm
+            --service-kind triton
+            --streaming
+            --url "$url"
+            --num-prompts 100
+            --random-seed 1
+            --synthetic-input-tokens-mean "$inputLength"
+            --synthetic-input-tokens-stddev 0
+            --output-tokens-mean "$outputLength"
+            --concurrency "$concurrency"
+            --measurement-interval "$measurement_interval"
+
+            cat "artifacts/opt350m-triton-vllm-concurrency${concurrency}/profile_export_genai_perf.csv"
+
+            done
+
+        env:
+          model: "opt350m"
+          url: "triton-server.triton-server.svc:8001"
+          inputLength: "128"
+          outputLength: "128"
+          concurrency_list: "8 16 32 64 128"
+          measurement_interval: "30000"
+
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+
+        resources:
+          limits:
+            cpu: 1
+            memory: 1Gi
+
+persistence:
+  prompts:
+    type: configMap
+    name: triton-client-prompts
+    advancedMounts:
+      triton-client:
+        test:
+          - path: /workspace/prompts.txt
+            subPath: prompts.txt
+            readOnly: true
+
+  workspace:
+    type: emptyDir
+    advancedMounts:
+      triton-client:
+        test:
+          - path: /workspace
