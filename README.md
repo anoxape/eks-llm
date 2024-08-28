@@ -97,13 +97,12 @@ Resources:
     - An IAM role for Triton Server pods with access to the S3 bucket
     - An IAM policy for the role allowing specific actions on the S3 bucket
 
-Variables:
+Variables ([terraform/terraform.tfvars.example](terraform/terraform.tfvars.example)):
 - `name`: The name for the EKS cluster and related resources
 - `tags`: (Optional) Additional tags to be applied to resources
 - `region`: The AWS region where the infrastructure will be deployed
 - `azs`: A list of availability zones for the VPC
 - `cidr`: The base CIDR block for the VPC
-- `admin_arn`: The ARN of the IAM user to provide with administrative access to the EKS cluster
 
 ### Kubernetes
 
@@ -112,12 +111,16 @@ Module structure:
     - defines Helm chart repositories, deployment options and dependencies
     - specifies the releases to be deployed
     - references values files for specific configurations of each release
-- [`kubernetes/values`](kubernetes/values) files:
+- [`kubernetes/values/`](kubernetes/values/) files:
     - located in subdirectories corresponding to each Helm chart release
     - override values with specific configurations for the deployment
     - some values files reference:
         - terraform outputs expected in `kubernetes/terraform_output.json` file
         - secrets stored in a separate `kubernetes/secrets.yaml` file
+
+Secrets ([kubernetes/secrets.yaml.example](kubernetes/secrets.yaml.example)):
+- `grafana.adminPassword` - Grafana `admin` password
+- `huggingface.token` - Hugging Face token
 
 Components:
 - [Triton Server](kubernetes/values/triton-server.yaml.gotmpl): A high-performance inference server for large language models (LLMs)
@@ -130,12 +133,12 @@ Components:
 
 ### Triton Server
 
-Controllers:
+Kubernetes Controllers:
 - `triton-server` (Deployment): NVIDIA Triton Server with vLLM backend
 - `prefetch` (DaemonSet): This container, running as a DaemonSet on all GPU nodes,
   ensures the NVIDIA Triton Server image is pre-fetched locally for faster deployment.
 
-Server:
+Triton Server Pod:
 - loads models from an S3 bucket location specified by Terraform output
 - caches Hugging Face data on the host node using a hostPath volume (`/var/cache/huggingface`)
 - uses a separate secret to store the Hugging Face authentication token
@@ -149,7 +152,7 @@ Horizontal Pod Autoscaler (HPA):
 
 ### Triton Client
 
-Job:
+Kubernetes Job:
 - automatically triggered on install/upgrade
 - runs to completion and doesn't restart on failure
 - runs two containers sequentially
@@ -165,6 +168,12 @@ Perf container:
 - runs `genai-perf` with several different concurrency variations
 
 ## Report
+
+Report obtained from the test run of `triton-client` job log using:
+```shell
+make
+kubectl logs -n triton-client jobs/triton-client
+```
 
 ### Concurrency 8
 
@@ -212,7 +221,7 @@ Request throughput (per sec): 6.62
 
 ### Concurrency 32
 
-Scaled to 2 replicas.
+Scaled up to 2 replicas by HPA.
 
 ```
 genai-perf --model opt350m --backend vllm --service-kind triton --streaming --url triton-server.triton-server.svc:8001 --num-prompts 100 --random-seed 1 --synthetic-input-tokens-mean 128 --synthetic-input-tokens-stddev 0 --output-tokens-mean 128 --concurrency 32 --measurement-interval 30000
@@ -233,7 +242,7 @@ Request throughput (per sec): 9.71
 
 ### Concurrency 64
 
-Scaled to 3 replicas.
+Scaled up to 3 replicas by HPA.
 
 ```
 genai-perf --model opt350m --backend vllm --service-kind triton --streaming --url triton-server.triton-server.svc:8001 --num-prompts 100 --random-seed 1 --synthetic-input-tokens-mean 128 --synthetic-input-tokens-stddev 0 --output-tokens-mean 128 --concurrency 64 --measurement-interval 30000
@@ -254,7 +263,7 @@ Request throughput (per sec): 17.62
 
 ### Concurrency 128
 
-Scaled to 4 replicas.
+Scaled up to 4 replicas by HPA.
 
 ```
 genai-perf --model opt350m --backend vllm --service-kind triton --streaming --url triton-server.triton-server.svc:8001 --num-prompts 100 --random-seed 1 --synthetic-input-tokens-mean 128 --synthetic-input-tokens-stddev 0 --output-tokens-mean 128 --concurrency 128 --measurement-interval 30000
